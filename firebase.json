@@ -1,0 +1,10 @@
+{
+  "hosting": {
+    "public": "public",
+    "predeploy": ["node scripts/build-config.js"],
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "headers": [
+      { "source": "**/*.@(js|css|html)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "orbit-lab",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-config.js",
+    "dev": "node scripts/build-config.js && node dev-server.js",
+    "test": "node scripts/build-config.js && node scripts/test.js",
+    "deploy": "npx firebase-tools deploy --only hosting"
+  }
+}
