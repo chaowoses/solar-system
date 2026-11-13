@@ -1,7 +1,6 @@
 import { System, STAR_MASS, PLANET_MASS, STAR_RADIUS } from "./physics.js";
-import { loadOrCreateG, saveG } from "./storage.js";
-import { randomG } from "./constant.js";
-import { verifyPin } from "./pin.js";
+import { loadOrCreateLetter } from "./storage.js";
+import { G_KEY } from "./constant.js";
 
 const $ = (id) => document.getElementById(id);
 const TAU = Math.PI * 2;
@@ -37,17 +36,36 @@ const FADE_OUT_MS = 40;
 const CRASH_ALPHA = 0.07; // how see-through it is (lower = fainter)
 
 const canvas = $("view");
-const ctx = canvas.getContext("2d");
+let ctx = canvas.getContext("2d"); // swapped to the overlay's context while drawing the 3D overlay
+const hud = $("hud3d");
+const hctx = hud.getContext("2d");
 let W = 0;
 let H = 0;
 
+// Optional 3D view (three.js), loaded the first time it is switched on.
+let v3 = null;
+let mode3d = false;
+
 const PLANET_COLOR = "#6fa8c9";
 const VEL_COLOR = "#9cc9e4"; // a lighter cousin of the planet colour
+// the 3D view wears the sun's warm gold instead, to sit in the scene
+const VEL_COLOR_3D = "#ffc46b";
+let velColor = VEL_COLOR;
+let ringColor = "rgba(156,201,228,0.45)";
+let dashColor = "rgba(235,230,216,0.75)";
 const TAPE_COLOR = "#f2c879";
 const MONO = "ui-monospace, Consolas, monospace";
 const VIEW_RADIUS = 520; // distance that fits the screen at the default zoom
-const VSCALE = 0.3; // on-screen pixels of velocity arrow per unit of speed
-const V_MAX = 2000;
+// The launch arrow is measured against the circular-orbit speed at the planet's
+// distance, not in raw speed units: CIRC_PX of arrow means "exactly circular",
+// whatever this browser's G is or wherever the planet sits. The arrow can't be
+// pulled past MAX_AIM x circular (about 85% of escape speed), so a release is
+// always a bound orbit: it can't fly off forever.
+const CIRC_PX = 90;
+const MAX_AIM = 1.2;
+let aim = { x: 0, y: 0 }; // arrow offset in px at the default zoom (x right, y up); it scales with the view
+const aimScale = () => view.scale / view.fit; // on-screen px per default-zoom px
+let aim3 = { x: 0, y: 0 }; // the same arrow in 3D: a velocity in units of circular speed, along the world axes
 
 /* ------------------------------------------------------------------ */
 /* Canvas + camera                                                     */
@@ -61,9 +79,13 @@ function resize() {
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  hud.width = canvas.width;
+  hud.height = canvas.height;
+  hctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   view.fit = (0.5 * Math.min(W, H) * 0.9) / VIEW_RADIUS;
   if (!view.moved) fitView();
   buildBackdrop();
+  if (v3) v3.resize(W, H);
   dirty = true;
 }
 
@@ -74,8 +96,11 @@ function fitView() {
   view.moved = false;
 }
 
-const toScreen = (x, y) => [W / 2 + (x - view.cx) * view.scale, H / 2 - (y - view.cy) * view.scale];
-const toWorld = (sx, sy) => [view.cx + (sx - W / 2) / view.scale, view.cy - (sy - H / 2) / view.scale];
+const toScreen = (x, y) => (mode3d && v3 ? v3.project(x, y) : [W / 2 + (x - view.cx) * view.scale, H / 2 - (y - view.cy) * view.scale]);
+const toWorld = (sx, sy) => {
+  if (mode3d && v3) return v3.unproject(sx, sy) || [0, 0];
+  return [view.cx + (sx - W / 2) / view.scale, view.cy - (sy - H / 2) / view.scale];
+};
 
 function zoomAt(sx, sy, factor) {
   const [wx, wy] = toWorld(sx, sy);
@@ -247,14 +272,14 @@ function drawTrail() {
   ctx.globalAlpha = 1;
 }
 
-function drawVelocity(px, py, tx, ty, speed) {
+function drawVelocity(px, py, tx, ty) {
   const len = Math.hypot(tx - px, ty - py);
   if (len < 1) return;
   const ux = (tx - px) / len;
   const uy = (ty - py) / len;
   const R = 8; // handle ring, same as the tape measure's
 
-  ctx.strokeStyle = VEL_COLOR;
+  ctx.strokeStyle = velColor;
   ctx.lineWidth = 1.6;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -291,20 +316,21 @@ function drawVelocity(px, py, tx, ty, speed) {
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(tx, ty, 2.2, 0, TAU);
-  ctx.fillStyle = VEL_COLOR;
+  ctx.fillStyle = velColor;
   ctx.fill();
 
-  // label on a dark pill, like the tape's
-  const label = "v " + speed.toFixed(1);
-  ctx.font = "600 12px " + MONO;
-  const tw = ctx.measureText(label).width;
-  const lx = tx + 14;
-  const ly = ty - 24;
-  ctx.fillStyle = "#0d1015";
-  ctx.fillRect(lx - 6, ly - 1, tw + 12, 19);
-  ctx.fillStyle = VEL_COLOR;
+  // the launch speed, beside the handle
+  const label = "v = " + Math.hypot(sys.home.vx, sys.home.vy).toFixed(1);
+  ctx.font = `600 12px ${MONO}`;
+  ctx.textAlign = ux > 0.35 ? "left" : ux < -0.35 ? "right" : "center";
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(13,16,21,0.85)";
+  const lx = tx + ux * (R + 8);
+  const ly = ty + uy * (R + 8) + (uy > 0.35 ? 12 : uy < -0.35 ? -2 : 4);
+  ctx.strokeText(label, lx, ly);
+  ctx.fillStyle = velColor;
+  ctx.fillText(label, lx, ly);
   ctx.textAlign = "left";
-  ctx.fillText(label, lx, ly + 12.5);
 }
 
 function draw() {
@@ -349,33 +375,61 @@ function draw() {
   }
 
   if (placing) {
-    const h = sys.home;
-    const speed = Math.hypot(h.vx, h.vy);
-    ctx.save();
-    ctx.setLineDash([3, 3]);
-    ctx.strokeStyle = "rgba(235,230,216,0.75)";
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.arc(px, py, 12, 0, TAU);
-    ctx.stroke();
-    if (speed * VSCALE < 20) {
-      // no velocity yet: show where to grab to give it one
-      ctx.strokeStyle = "rgba(156,201,228,0.45)";
-      ctx.beginPath();
-      ctx.arc(px, py, 34, 0, TAU);
-      ctx.stroke();
-    }
-    ctx.restore();
-    if (speed > 0) {
-      const tx = px + h.vx * VSCALE;
-      const ty = py - h.vy * VSCALE;
-      drawVelocity(px, py, tx, ty, speed);
-    }
+    const aimLen = Math.hypot(aim.x, aim.y);
+    drawAimMarks(px, py, aimLen);
+    const k = aimScale();
+    if (aimLen > 0) drawVelocity(px, py, px + aim.x * k, py - aim.y * k);
   }
 
   if (tape.on && tape.a && tape.b) drawTape();
 
   drawScale();
+}
+
+/** The dashed ring round a planet that is still being placed, and the grab ring for giving it a velocity. */
+function drawAimMarks(px, py, aimLen, ring = 12) {
+  ctx.save();
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = dashColor;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(px, py, ring, 0, TAU);
+  ctx.stroke();
+  if (aimLen < 20) {
+    // no velocity yet: show where to grab to give it one
+    ctx.strokeStyle = ringColor;
+    ctx.beginPath();
+    ctx.arc(px, py, 34, 0, TAU);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** The 3D view's overlay: aim arrow, grab rings and tape measure, drawn in screen space over the scene. */
+function drawOverlay3D() {
+  const keep = ctx;
+  ctx = hctx;
+  ctx.clearRect(0, 0, W, H);
+  velColor = VEL_COLOR_3D;
+  ringColor = "rgba(255,196,107,0.4)";
+  dashColor = "rgba(255,226,170,0.7)";
+  ctx.shadowColor = "rgba(255,160,60,0.85)";
+  ctx.shadowBlur = 10;
+  const p = sys.bodies[1];
+  const [px, py] = v3.project(p.x, p.y);
+  if (!started && !sys.crashed) {
+    const aw = CIRC_PX * v3.refWpp(); // world length of "circular speed": fixed, so it scales with the zoom
+    const [tx, ty] = v3.project(p.x + aim3.x * aw, p.y + aim3.y * aw);
+    const len = Math.hypot(aim3.x, aim3.y) * CIRC_PX;
+    drawAimMarks(px, py, len, Math.max(12, v3.planetPx(p.x, p.y) + 5));
+    if (len > 0) drawVelocity(px, py, tx, ty);
+  }
+  ctx.shadowBlur = 0;
+  if (tape.on && tape.a && tape.b) drawTape();
+  velColor = VEL_COLOR;
+  ringColor = "rgba(156,201,228,0.45)";
+  dashColor = "rgba(235,230,216,0.75)";
+  ctx = keep;
 }
 
 function drawExplosion(x, y) {
@@ -505,7 +559,20 @@ let last = performance.now();
 function frame(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
-  if (sys) {
+  if (sys && mode3d && v3) {
+    if (playing) {
+      sys.run(dt * speed, sampleTrail);
+      if (sys.crashed || sys.escaped) {
+        playing = false;
+        updateUI();
+      }
+    }
+    updateReadouts();
+    const [star, planet] = sys.bodies;
+    v3.render(now, { star, planet, trail, crashed: sys.crashed, cinematic: playing });
+    drawOverlay3D();
+    dirty = true; // redraw the 2D view when switching back
+  } else if (sys) {
     if (playing) {
       sys.run(dt * speed, sampleTrail);
       if (sys.crashed || sys.escaped) {
@@ -533,7 +600,6 @@ function frame(now) {
 
 function updateReadouts() {
   $("timer").textContent = sys.t.toFixed(3);
-  updateTheory();
 }
 
 function updateSpeed() {
@@ -587,6 +653,7 @@ function wireControls() {
         // appear in the middle of the screen, wherever the view is
         const [ax, ay] = toWorld(W / 2 - 120, H * 0.7);
         const [bx, by] = toWorld(W / 2 + 120, H * 0.7);
+        // (in 3D these land on the orbital plane under those screen points)
         tape.a = { x: ax, y: ay };
         tape.b = { x: bx, y: by };
       }
@@ -594,17 +661,49 @@ function wireControls() {
     updateUI();
     dirty = true;
   });
-  $("zin").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.4));
-  $("zout").addEventListener("click", () => zoomAt(W / 2, H / 2, 1 / 1.4));
+  $("toggle3d").addEventListener("click", async () => {
+    const btn = $("toggle3d");
+    if (!mode3d && !v3) {
+      btn.disabled = true;
+      try {
+        const { createView3D } = await import("./view3d.js");
+        v3 = createView3D($("view3d"));
+        v3.resize(W, H);
+      } catch (err) {
+        console.error(err);
+        btn.textContent = "3D unavailable";
+        return;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    mode3d = !mode3d;
+    document.body.classList.toggle("mode3d", mode3d);
+    $("hint3d").hidden = !mode3d;
+    btn.setAttribute("aria-pressed", String(mode3d));
+    btn.textContent = mode3d ? "2D view" : "3D view";
+    // the launch arrow is the same velocity in both views; only its units differ
+    // (screen pixels in 2D, multiples of circular speed along the world axes in 3D)
+    const vc = Math.sqrt((sys.G * STAR_MASS) / Math.hypot(sys.home.x, sys.home.y));
+    if (mode3d) {
+      aim3 = { x: sys.home.vx / vc, y: sys.home.vy / vc };
+      v3.resetCamera(Math.hypot(sys.home.x, sys.home.y));
+    } else {
+      aim = { x: aim3.x * CIRC_PX, y: aim3.y * CIRC_PX };
+    }
+    dirty = true;
+  });
+  $("zin").addEventListener("click", () => (mode3d ? v3.zoom(1.4) : zoomAt(W / 2, H / 2, 1.4)));
+  $("zout").addEventListener("click", () => (mode3d ? v3.zoom(1 / 1.4) : zoomAt(W / 2, H / 2, 1 / 1.4)));
   $("fit").addEventListener("click", () => {
-    fitView();
+    if (mode3d) v3.resetCamera(Math.hypot(sys.home.x, sys.home.y));
+    else fitView();
     dirty = true;
   });
 
   window.addEventListener("keydown", (e) => {
-    if (e.code === "Escape") $("teacher").hidden = true;
     if (e.code !== "Space" || e.repeat) return;
-    if (e.target !== document.body && e.target !== canvas) return;
+    if (e.target !== document.body && e.target !== canvas && e.target !== $("view3d")) return;
     e.preventDefault();
     play();
   });
@@ -618,6 +717,13 @@ const PLANET_PICK = 11;
 const HANDLE_PICK = 14;
 const AIM_RING = 46;
 
+/** Turn the on-screen arrow into a real velocity for wherever the planet is now. */
+function applyAim() {
+  const h = sys.home;
+  const vc = Math.sqrt((sys.G * STAR_MASS) / Math.hypot(h.x, h.y));
+  sys.setVelocity((aim.x / CIRC_PX) * vc, (aim.y / CIRC_PX) * vc);
+}
+
 function planetScreen() {
   return toScreen(sys.bodies[1].x, sys.bodies[1].y);
 }
@@ -628,10 +734,10 @@ function grabTarget(sx, sy) {
   const [px, py] = planetScreen();
   const d = Math.hypot(sx - px, sy - py);
   if (d <= PLANET_PICK) return "planet";
-  const h = sys.home;
-  const speed = Math.hypot(h.vx, h.vy);
-  if (speed > 0 && Math.hypot(sx - (px + h.vx * VSCALE), sy - (py - h.vy * VSCALE)) <= HANDLE_PICK) return "velocity";
-  if (speed * VSCALE < 20 && d <= AIM_RING) return "velocity";
+  const len = Math.hypot(aim.x, aim.y);
+  const k = aimScale();
+  if (len > 0 && Math.hypot(sx - (px + aim.x * k), sy - (py - aim.y * k)) <= HANDLE_PICK) return "velocity";
+  if (len < 20 && d <= AIM_RING) return "velocity";
   return null;
 }
 
@@ -667,18 +773,22 @@ function wireCanvas() {
   const placeAt = (sx, sy) => {
     const [wx, wy] = toWorld(sx, sy);
     sys.place(wx - sys.bodies[0].x, wy - sys.bodies[0].y);
+    applyAim(); // keep the same arrow (relative to circular speed) at the new distance
     edited();
   };
   const aimAt = (sx, sy) => {
     const [px, py] = planetScreen();
-    let vx = (sx - px) / VSCALE;
-    let vy = -(sy - py) / VSCALE;
-    const v = Math.hypot(vx, vy);
-    if (v > V_MAX) {
-      vx *= V_MAX / v;
-      vy *= V_MAX / v;
+    const k = aimScale();
+    let dx = (sx - px) / k;
+    let dy = -(sy - py) / k;
+    const len = Math.hypot(dx, dy);
+    const max = CIRC_PX * MAX_AIM;
+    if (len > max) {
+      dx *= max / len;
+      dy *= max / len;
     }
-    sys.setVelocity(vx, vy);
+    aim = len < 3 ? { x: 0, y: 0 } : { x: dx, y: dy };
+    applyAim();
     edited();
   };
 
@@ -749,173 +859,210 @@ function wireCanvas() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Instructor panel: the PIN opens it                                  */
+/* Pointer interaction in the 3D view                                  */
 /* ------------------------------------------------------------------ */
 
-// What Newton says the current setup will do, from the planet's placed
-// position and velocity: semi-major axis a (half the major axis, the lab's r)
-// and period T = 2 pi sqrt(a^3 / GM). null when it isn't a closed orbit
-// (unbound, or it dips inside the star).
-function theory() {
-  const h = sys.home;
-  const GM = sys.G * STAR_MASS;
-  const r = Math.hypot(h.x, h.y);
-  const inv = 2 / r - (h.vx * h.vx + h.vy * h.vy) / GM;
-  if (inv <= 1e-12) return null;
-  const a = 1 / inv;
-  const L = h.x * h.vy - h.y * h.vx; // angular momentum per unit mass
-  const e = Math.sqrt(Math.max(0, 1 - (L * L) / GM / a));
-  if (a * (1 - e) <= STAR_RADIUS) return null;
-  return { a, T: TAU * Math.sqrt((a * a * a) / GM) };
-}
-
-const showTheory = { radius: false, period: false };
-
-function updateTheory() {
-  $("theory").hidden = !(showTheory.radius || showTheory.period);
-  $("theoryR").hidden = !showTheory.radius;
-  $("theoryT").hidden = !showTheory.period;
-  if (!sys || !(showTheory.radius || showTheory.period)) return;
-  const th = theory();
-  $("theoryRVal").textContent = th ? th.a.toFixed(1) : "—";
-  $("theoryTVal").textContent = th ? `${th.T.toFixed(3)} s` : "—";
-}
-
-function wireTeacher() {
-  const panel = $("teacher");
-  const err = $("teacherError");
-  const rb = $("randomize");
-  let armTimer = 0;
-  let wrong = 0;
-  let lockedUntil = 0;
-  let gShown = false;
-
-  // The PIN box is an ordinary text input that CSS draws as dots (so typing,
-  // pasting and IMEs all behave natively). It is deliberately not type="password"
-  // so browsers and password managers have nothing to offer to save. The eye
-  // button shows it in the clear.
-  const pinEl = $("pin");
-  const nativeMask = CSS.supports("-webkit-text-security", "disc") || CSS.supports("text-security", "disc");
-  let pinShown = false;
-  const applyMask = () => {
-    pinEl.classList.toggle("masked", !pinShown);
-    if (!nativeMask) pinEl.type = pinShown ? "text" : "password"; // browsers that can't mask text inputs
-    $("togglePin").setAttribute("aria-pressed", String(pinShown));
-    $("togglePin").setAttribute("aria-label", pinShown ? "Hide PIN" : "Show PIN");
-    $("togglePin").title = pinShown ? "Hide PIN" : "Show PIN";
+// Same lab, same gestures: drag the planet along the orbital plane, drag the
+// arrow to set the velocity, drag the tape. Anything else orbits the camera.
+function wire3D() {
+  const c3 = $("view3d");
+  let grab = null;
+  const local = (e) => {
+    const r = c3.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
   };
-  applyMask();
-  $("togglePin").addEventListener("click", () => {
-    pinShown = !pinShown;
-    applyMask();
-    pinEl.focus();
-  });
-
-  const disarm = () => {
-    clearTimeout(armTimer);
-    rb.classList.remove("armed");
-    rb.textContent = "Randomize G";
+  const arrowWorld = () => CIRC_PX * v3.refWpp();
+  const edited = () => {
+    trail = [];
+    updateUI();
   };
-  const fail = (msg) => {
-    err.textContent = msg;
-    err.hidden = false;
-  };
-  const renderG = () => {
-    $("gValue").textContent = gShown && sys ? String(sys.G) : "•••••";
-    $("toggleG").textContent = gShown ? "Hide" : "Show";
-    $("toggleG").setAttribute("aria-pressed", String(gShown));
-  };
-  const lock = () => {
-    $("pinForm").hidden = false;
-    $("tools").hidden = true;
-    pinEl.value = "";
-    pinShown = false;
-    applyMask();
-    err.hidden = true;
-    gShown = false;
-    renderG();
-    disarm();
-  };
-  // Closing the panel locks it again and hides G; the theory toggles stay as set.
-  const open = (show) => {
-    panel.hidden = !show;
-    if (show) {
-      lock();
-      $("pin").focus();
-    } else lock();
-  };
-  const refreshAll = () => {
-    dirty = true;
-    updateTheory();
+  const applyAim3 = () => {
+    const h = sys.home;
+    const vc = Math.sqrt((sys.G * STAR_MASS) / Math.hypot(h.x, h.y));
+    sys.setVelocity(aim3.x * vc, aim3.y * vc);
   };
 
-  // The PIN is only ever compared as a salted hash (see scripts/build-config.js).
-  // A short lockout after repeated misses slows down guessing at the keyboard.
-  async function pinOk() {
-    const pin = pinEl.value;
-    if (Date.now() < lockedUntil) {
-      fail(`Too many wrong tries. Wait ${Math.ceil((lockedUntil - Date.now()) / 1000)}s.`);
-      return false;
+  function target(x, y) {
+    if (started) return null;
+    const p = sys.bodies[1];
+    const [px, py] = v3.project(p.x, p.y);
+    const d = Math.hypot(x - px, y - py);
+    if (d <= Math.max(PLANET_PICK, v3.planetPx(p.x, p.y) + 4)) return "planet";
+    const aw = arrowWorld();
+    const [tx, ty] = v3.project(p.x + aim3.x * aw, p.y + aim3.y * aw);
+    const len = Math.hypot(aim3.x, aim3.y) * CIRC_PX;
+    if (len > 0 && Math.hypot(x - tx, y - ty) <= HANDLE_PICK) return "velocity";
+    if (len < 20 && d <= AIM_RING) return "velocity";
+    return null;
+  }
+  function placeAt(x, y) {
+    const q = v3.unproject(x, y);
+    if (!q) return;
+    sys.place(q[0] - sys.bodies[0].x, q[1] - sys.bodies[0].y);
+    applyAim3(); // keep the same arrow (relative to circular speed) at the new distance
+    edited();
+  }
+  function aimAt(x, y) {
+    const q = v3.unproject(x, y);
+    if (!q) return;
+    const p = sys.bodies[1];
+    const aw = arrowWorld();
+    let rx = (q[0] - p.x) / aw;
+    let ry = (q[1] - p.y) / aw;
+    const len = Math.hypot(rx, ry);
+    const max = MAX_AIM; // multiples of circular speed, as in 2D
+    if (len > max) {
+      rx *= max / len;
+      ry *= max / len;
     }
-    if (!pin) {
-      fail("Enter the PIN.");
-      return false;
-    }
-    if (await verifyPin(pin)) {
-      wrong = 0;
-      return true;
-    }
-    if (++wrong >= 5) {
-      wrong = 0;
-      lockedUntil = Date.now() + 30000;
-    }
-    fail("That PIN isn't right.");
-    $("pin").select();
-    return false;
+    aim3 = len * CIRC_PX < 3 ? { x: 0, y: 0 } : { x: rx, y: ry };
+    applyAim3();
+    edited();
   }
 
-  $("openTeacher").addEventListener("click", () => open(panel.hidden));
-  $("closeTeacher").addEventListener("click", () => open(false));
+  // Capture phase, so a grab on the planet/arrow/tape never reaches the camera controls.
+  c3.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (!sys || !mode3d || !v3 || e.button !== 0) return; // right-drag / shift-drag pan the camera
+      const [x, y] = local(e);
+      v3.poke();
+      let taken = false;
+      const part = tapeHit(x, y);
+      if (part) {
+        const q = v3.unproject(x, y);
+        if (q) {
+          tapeGrab = { part, wx: q[0], wy: q[1], a: { ...tape.a }, b: { ...tape.b } };
+          taken = true;
+        }
+      } else {
+        grab = target(x, y);
+        taken = !!grab;
+      }
+      if (!taken) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      c3.setPointerCapture(e.pointerId);
+      if (grab === "planet") placeAt(x, y);
+      else if (grab === "velocity") aimAt(x, y);
+    },
+    true
+  );
+  c3.addEventListener("pointermove", (e) => {
+    if (!sys || !mode3d || !v3) return;
+    const [x, y] = local(e);
+    if (tapeGrab) {
+      const q = v3.unproject(x, y);
+      if (!q) return;
+      const [wx, wy] = q;
+      if (tapeGrab.part === "a") tape.a = { x: wx, y: wy };
+      else if (tapeGrab.part === "b") tape.b = { x: wx, y: wy };
+      else {
+        const dx = wx - tapeGrab.wx;
+        const dy = wy - tapeGrab.wy;
+        tape.a = { x: tapeGrab.a.x + dx, y: tapeGrab.a.y + dy };
+        tape.b = { x: tapeGrab.b.x + dx, y: tapeGrab.b.y + dy };
+      }
+    } else if (grab === "planet") placeAt(x, y);
+    else if (grab === "velocity") aimAt(x, y);
+    else c3.style.cursor = target(x, y) || tapeHit(x, y) ? "pointer" : "";
+  });
+  const end = () => {
+    grab = null;
+    tapeGrab = null;
+  };
+  c3.addEventListener("pointerup", end);
+  c3.addEventListener("pointercancel", end);
+}
 
-  $("pinForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    err.hidden = true;
-    if (!sys || !(await pinOk())) return;
-    pinEl.value = "";
-    $("pinForm").hidden = true;
-    $("tools").hidden = false;
-    renderG();
-  });
+/* ------------------------------------------------------------------ */
+/* Timer panel: drag by its header, resize from the corner, reset      */
+/* ------------------------------------------------------------------ */
 
-  $("toggleG").addEventListener("click", () => {
-    gShown = !gShown;
-    renderG();
-  });
-  $("optRadius").addEventListener("change", (e) => {
-    showTheory.radius = e.target.checked;
-    refreshAll();
-  });
-  $("optPeriod").addEventListener("change", (e) => {
-    showTheory.period = e.target.checked;
-    refreshAll();
-  });
+function wireHud() {
+  const box = $("hudbox");
+  const grip = $("timerGrip");
+  const rz = $("timerResize");
+  const rb = $("timerReset");
+  const MIN_S = 0.7;
+  const MAX_S = 2.4;
+  let s = 1; // size, as a multiple of the default
+  let moved = false;
 
-  // Two clicks: the first arms the button so a stray click can't restart a
-  // student's run.
-  rb.addEventListener("click", async () => {
-    if (!rb.classList.contains("armed")) {
-      rb.classList.add("armed");
-      rb.textContent = "Click again to confirm";
-      armTimer = setTimeout(disarm, 4000);
-      return;
+  const refresh = () => {
+    box.style.setProperty("--s", String(s));
+    rb.hidden = !moved && s === 1;
+  };
+  const keepOnScreen = () => {
+    const w = box.offsetWidth * s;
+    const h = box.offsetHeight * s;
+    const x = Math.min(Math.max(0, box.offsetLeft), Math.max(0, window.innerWidth - w));
+    const y = Math.min(Math.max(0, box.offsetTop), Math.max(0, window.innerHeight - h));
+    if (x !== box.offsetLeft || y !== box.offsetTop) {
+      box.style.left = x + "px";
+      box.style.top = y + "px";
+      moved = true;
     }
-    disarm();
-    if (!sys) return;
-    const g = randomG();
-    await saveG(g);
-    launch(g);
-    renderG();
+  };
+  const reset = () => {
+    s = 1;
+    moved = false;
+    box.style.left = "";
+    box.style.top = "";
+    refresh();
+  };
+
+  // A small helper: run move/up handlers for one drag.
+  const drag = (el, e, onMove) => {
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    const up = () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+    };
+    el.classList.add("dragging");
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("#timerReset")) return;
+    const x0 = box.offsetLeft;
+    const y0 = box.offsetTop;
+    const px = e.clientX;
+    const py = e.clientY;
+    drag(grip, e, (ev) => {
+      const w = box.offsetWidth * s;
+      const h = box.offsetHeight * s;
+      box.style.left = Math.min(Math.max(0, x0 + ev.clientX - px), Math.max(0, window.innerWidth - w)) + "px";
+      box.style.top = Math.min(Math.max(0, y0 + ev.clientY - py), Math.max(0, window.innerHeight - h)) + "px";
+      moved = true;
+      refresh();
+    });
   });
+
+  rz.addEventListener("pointerdown", (e) => {
+    const s0 = s;
+    const px = e.clientX;
+    const base = box.offsetWidth;
+    drag(rz, e, (ev) => {
+      s = Math.min(MAX_S, Math.max(MIN_S, s0 + (ev.clientX - px) / base));
+      keepOnScreen();
+      refresh();
+    });
+  });
+
+  rb.addEventListener("click", reset);
+  grip.addEventListener("dblclick", (e) => {
+    if (!e.target.closest("#timerReset")) reset();
+  });
+  window.addEventListener("resize", () => {
+    if (moved) keepOnScreen();
+  });
+  refresh();
 }
 
 /* ------------------------------------------------------------------ */
@@ -926,11 +1073,14 @@ $("starMass").textContent = String(STAR_MASS);
 $("planetMass").textContent = String(PLANET_MASS);
 wireControls();
 wireCanvas();
-wireTeacher();
+wire3D();
+wireHud();
 
-/** Start fresh with a given G (first load, or after the teacher randomizes). */
-function launch(G) {
-  sys = new System(G);
+/** Start fresh for a given letter A-H (each is a fixed G). */
+function launch(letter) {
+  $("letter").textContent = letter;
+  sys = new System(G_KEY[letter]);
+  aim = { x: 0, y: 0 };
   started = false;
   trail = [];
   setPlaying(false);
@@ -941,4 +1091,4 @@ new ResizeObserver(resize).observe(canvas);
 resize();
 updateUI();
 requestAnimationFrame(frame);
-loadOrCreateG().then(launch);
+loadOrCreateLetter().then(launch);

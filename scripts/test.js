@@ -5,28 +5,19 @@ const { pathToFileURL } = require("url");
 const js = (f) => pathToFileURL(path.join(__dirname, "..", "public", "js", f)).href;
 
 (async () => {
-  const { randomG, G_MIN, G_MAX } = await import(js("constant.js"));
-  const vals = [];
-  for (let i = 0; i < 5000; i++) {
-    const g = randomG();
-    assert(g >= G_MIN * 0.999 && g <= G_MAX * 1.001, `out of range: ${g}`);
-    assert(Math.abs(g / 10000 - 1) > 0.09, `too close to 10000: ${g}`);
-    vals.push(g);
+  const { G_KEY, LETTERS, G_MIN, G_MAX, randomLetter } = await import(js("constant.js"));
+  assert.deepStrictEqual(LETTERS, ["A", "B", "C", "D", "E", "F", "G", "H"]);
+  const values = Object.values(G_KEY);
+  assert.strictEqual(new Set(values).size, 8, "each letter needs its own G");
+  for (const g of values) assert(Math.abs(g / 10000 - 1) > 0.09, `too close to 10000: ${g}`);
+  const seen = new Set();
+  for (let i = 0; i < 2000; i++) {
+    const l = randomLetter();
+    assert(l in G_KEY, `bad letter ${l}`);
+    seen.add(l);
   }
-  vals.sort((a, b) => a - b);
-  console.log(`G over 5000 draws: min ${vals[0]}, median ${vals[2500]}, max ${vals[4999]}`);
-  assert(vals[4999] / vals[0] > 10, "not varied enough");
-
-  // The teacher PIN is only shipped as a salted hash.
-  const fs = require("fs");
-  const { verifyPin } = await import(js("pin.js"));
-  const pin = (fs.readFileSync(path.join(__dirname, "..", ".env"), "utf8").match(/TEACHER_PIN\s*=\s*(.*)/) || [])[1].trim();
-  assert.strictEqual(await verifyPin(pin), true);
-  assert.strictEqual(await verifyPin(pin + "x"), false);
-  assert.strictEqual(await verifyPin(""), false);
-  const cfg = fs.readFileSync(path.join(__dirname, "..", "public", "js", "config.js"), "utf8");
-  assert(!cfg.includes(pin), "PIN leaked into config.js");
-  console.log("PIN check ok; config.js contains only the hash");
+  assert.strictEqual(seen.size, 8, "every letter should come up");
+  console.log("letters A-H map to 8 distinct fixed G values; all letters get drawn");
 
   const { System, STAR_MASS } = await import(js("physics.js"));
 
@@ -41,6 +32,25 @@ const js = (f) => pathToFileURL(path.join(__dirname, "..", "public", "js", f)).h
     assert(Math.abs(s.t / tff - 1) < 0.05, `fall time ${s.t} vs ${tff}`);
   }
   console.log("zero velocity -> crashes into the star, in the free-fall time");
+
+  // The launch arrow is capped at 1.2x circular speed (about 85% of escape
+  // speed), so any release, in any direction, at any distance and G, is bound.
+  for (const G of [G_MIN, 30000, G_MAX]) {
+    for (const r of [30, 200, 800]) {
+      for (let k = 0; k < 6; k++) {
+        const ang = (k / 6) * 2 * Math.PI;
+        const vc = Math.sqrt((G * STAR_MASS) / r);
+        const s = new System(G);
+        s.place(r, 0);
+        s.setVelocity(1.2 * vc * Math.cos(ang), 1.2 * vc * Math.sin(ang));
+        const E = 0.5 * (s.home.vx ** 2 + s.home.vy ** 2) - (G * STAR_MASS) / r;
+        assert(E < 0, `max launch must be bound (G=${G}, r=${r}, angle=${k})`);
+        s.run(2 * Math.PI * Math.sqrt((r * r * r) / (G * STAR_MASS)));
+        assert(!s.escaped, `max launch escaped (G=${G}, r=${r}, angle=${k})`);
+      }
+    }
+  }
+  console.log("the largest allowed launch speed never escapes");
 
   // Launched sideways: the period must follow T = 2*pi*sqrt(a^3 / GM) where
   // a is the semi-major axis (half the major axis), for circles and ellipses.
