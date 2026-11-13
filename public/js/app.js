@@ -1076,7 +1076,7 @@ wireCanvas();
 wire3D();
 wireHud();
 
-/** Start fresh for a given letter A-H (each is a fixed G). */
+/** Start fresh for a given letter A-Z (each is a fixed G). */
 function launch(letter) {
   $("letter").textContent = letter;
   sys = new System(G_KEY[letter]);

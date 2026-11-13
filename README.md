@@ -25,18 +25,40 @@ The arrow scales with the zoom in both views (it is a fixed length in the simula
 
 ## Instructor key
 
-| Set | G | Set | G |
-| --- | --- | --- | --- |
-| A | 22000 | E | 55000 |
-| B | 28000 | F | 70000 |
-| C | 35000 | G | 90000 |
-| D | 44000 | H | 115000 |
+| Set | G |
+| --- | --- |
+| A | 22000 |
+| B | 24000 |
+| C | 25500 |
+| D | 27500 |
+| E | 30000 |
+| F | 32500 |
+| G | 35000 |
+| H | 37500 |
+| I | 40500 |
+| J | 44000 |
+| K | 47500 |
+| L | 51000 |
+| M | 55500 |
+| N | 59500 |
+| O | 64500 |
+| P | 69500 |
+| Q | 75000 |
+| R | 81000 |
+| S | 87500 |
+| T | 94500 |
+| U | 102000 |
+| V | 110500 |
+| W | 119000 |
+| X | 128500 |
+| Y | 139000 |
+| Z | 150000 |
 
 The values live in `public/js/constant.js` (`G_KEY`). There is no PIN, `.env` or build step.
 
 ## How the letter works
 
-- On first load each browser draws a random letter A-H; each letter is a fixed G (none within 10% of 10000).
+- On first load each browser draws a random letter A-Z; each letter is a fixed G (none within 10% of 10000).
 - It is kept in `localStorage` **encrypted** (AES-GCM, with a non-extractable key held in IndexedDB), so a reload gives the same letter. Clearing site data or using a private window draws a new one.
 - Honest limit: there is no server and the key ships in the page's JavaScript, so a determined student could read it with devtools.
 

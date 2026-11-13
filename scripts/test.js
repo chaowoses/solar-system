@@ -6,18 +6,19 @@ const js = (f) => pathToFileURL(path.join(__dirname, "..", "public", "js", f)).h
 
 (async () => {
   const { G_KEY, LETTERS, G_MIN, G_MAX, randomLetter } = await import(js("constant.js"));
-  assert.deepStrictEqual(LETTERS, ["A", "B", "C", "D", "E", "F", "G", "H"]);
+  assert.deepStrictEqual(LETTERS, "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""));
   const values = Object.values(G_KEY);
-  assert.strictEqual(new Set(values).size, 8, "each letter needs its own G");
+  assert.strictEqual(new Set(values).size, 26, "each letter needs its own G");
+  assert(Math.min(...values) >= 22000, "lowest G should be 22000");
   for (const g of values) assert(Math.abs(g / 10000 - 1) > 0.09, `too close to 10000: ${g}`);
   const seen = new Set();
-  for (let i = 0; i < 2000; i++) {
+  for (let i = 0; i < 6000; i++) {
     const l = randomLetter();
     assert(l in G_KEY, `bad letter ${l}`);
     seen.add(l);
   }
-  assert.strictEqual(seen.size, 8, "every letter should come up");
-  console.log("letters A-H map to 8 distinct fixed G values; all letters get drawn");
+  assert.strictEqual(seen.size, 26, "every letter should come up");
+  console.log("letters A-Z map to 26 distinct fixed G values; all letters get drawn");
 
   const { System, STAR_MASS } = await import(js("physics.js"));
 
